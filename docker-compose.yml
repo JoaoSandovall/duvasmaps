@@ -1,0 +1,112 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  cache:
+    image: redis:alpine
+    restart: always
+    # Redis exige senha (antes rodava aberto na rede da stack).
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+
+  backend:
+    build: ./backend
+    ports:
+      # Em produção (com o proxy HTTPS abaixo na frente), considere REMOVER
+      # este mapeamento de porta para que o backend só seja alcançável via
+      # proxy (443), nunca direto por HTTP na 8020. Mantido aqui para
+      # facilitar o desenvolvimento local.
+      - "8020:8000"
+    volumes:
+      - ./backend:/app
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@cache:6379/0
+      - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY}
+      # Autenticação JWT — chave usada para assinar os tokens de login.
+      # CRÍTICO: sem isso definido, a aplicação agora recusa iniciar
+      # (antes existia um valor padrão inseguro embutido no código).
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      # Código de convite exigido para criar conta em /api/register.
+      # Compartilhe só com quem deve poder se cadastrar no sistema.
+      - REGISTRATION_SECRET=${REGISTRATION_SECRET}
+      # Username que tem acesso ao log de auditoria (/api/audit-log).
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      # Teto de resultados por busca de lugares (proteção de custo/DoS)
+      - MAX_PLACES_RESULTS=${MAX_PLACES_RESULTS:-200}
+      # CORS — lista de origens permitidas, separadas por vírgula
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173}
+      # RN05 — teto de chamadas pagas de API por usuário/mês
+      - MONTHLY_PAID_CALL_LIMIT=${MONTHLY_PAID_CALL_LIMIT:-500}
+      # RN09 — limites de upload
+      - MAX_UPLOAD_SIZE_BYTES=${MAX_UPLOAD_SIZE_BYTES:-8388608}
+      - MAX_UPLOAD_ROWS=${MAX_UPLOAD_ROWS:-800}
+      - AUTH_FAIL_LIMIT=${AUTH_FAIL_LIMIT:-10}
+      - AUTH_FAIL_WINDOW_SECONDS=${AUTH_FAIL_WINDOW_SECONDS:-900}
+      - AUTH_LOCKOUT_SECONDS=${AUTH_LOCKOUT_SECONDS:-900}
+      - LEAD_RETENTION_DAYS=${LEAD_RETENTION_DAYS:-180}
+    depends_on:
+      - db
+      - cache
+    # Em desenvolvimento, descomente a linha abaixo para habilitar hot-reload.
+    # O Dockerfile, por padrão, agora sobe sem --reload (mais seguro/estável
+    # para produção); mantenha o --reload restrito ao ambiente de dev.
+    # command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ---------------------------------------------------------------------
+  # Worker de retenção (RN11 — LGPD): roda cleanup_retention.py uma vez
+  # por dia, removendo lotes de leads mais antigos que LEAD_RETENTION_DAYS.
+  # Alternativa a configurar um cron no host.
+  # ---------------------------------------------------------------------
+  retention-worker:
+    build: ./backend
+    volumes:
+      - ./backend:/app
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - LEAD_RETENTION_DAYS=${LEAD_RETENTION_DAYS:-180}
+    depends_on:
+      - db
+    entrypoint: >
+      sh -c "while true; do python cleanup_retention.py; sleep 86400; done"
+    restart: always
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8020
+    depends_on:
+      - backend
+
+  proxy:
+    image: caddy:2-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

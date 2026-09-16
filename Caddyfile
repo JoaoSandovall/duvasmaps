@@ -1,0 +1,12 @@
+# Configuração do Caddy (proxy reverso com HTTPS automático).
+#
+# Em produção, troque "localhost" pelo seu domínio real (ex: api.suaempresa.com.br).
+# Com um domínio real, o Caddy obtém e renova certificados Let's Encrypt
+# sozinho — não precisa configurar nada manualmente de TLS.
+#
+# Em ambiente local (localhost), o Caddy usa um certificado autoassinado só
+# para desenvolvimento; o navegador vai mostrar aviso de certificado não
+# confiável, o que é esperado localmente.
+{$DOMAIN:localhost} {
+    reverse_proxy backend:8000
+}
